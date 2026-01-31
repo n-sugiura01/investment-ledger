@@ -1,0 +1,15 @@
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: investment-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: investment_db      # データベースの名前
+      POSTGRES_USER: postgres         # ユーザー名
+      POSTGRES_PASSWORD: password     # パスワード
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+volumes:
+  db_data:
