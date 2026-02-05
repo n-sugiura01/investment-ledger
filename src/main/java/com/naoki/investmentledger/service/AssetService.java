@@ -11,46 +11,23 @@ import java.math.RoundingMode;
 import java.util.List;
 
 @Service
-@RequiredArgsConstructor// finalがついているフィールドのコンストラクタを自動生成(Lombok)
+@RequiredArgsConstructor
 public class AssetService {
 
-    // Repository（データベース係）を呼び出せるようにする
     private final AssetRepository assetRepository;
 
-
-    // 全ての資産データを取得する
     public List<Asset> getAllAssets() {
         return assetRepository.findAll();
     }
 
-    // 新しい資産データを保存する
+    // 新規保存（口数自動計算付き）
     public Asset saveAsset(Asset asset) {
-        // ロジック：口数が未入力で、金額と基準価格がある場合、口数を自動計算する
-        if (asset.getHoldingUnits() == null
-                && asset.getInvestmentAmount() != null
-                && asset.getAcquisitionPrice() != null) {
-
-            // 計算式：投資額 ÷ 基準価格 × 10,000
-            // 例: 10,000円 ÷ 20,000円 × 10,000 = 5,000口
-            BigDecimal units = asset.getInvestmentAmount()
-                    .divide(asset.getAcquisitionPrice(), 4, RoundingMode.HALF_UP)// 割り算（小数第4位まで、四捨五入）
-                    .multiply(new BigDecimal("10000"));// 1万口単位なので掛ける
-
-            asset.setHoldingUnits(units);
-        }
-
-        // ここに将来、「入力された金額から口数を自動計算する」などのロジックを追加できます
+        calculateUnits(asset); // ロジックをメソッドに切り出しました
         return assetRepository.save(asset);
     }
 
-    /*
-     * 資産データを更新する
-     * @param id 更新したいデータのID
-     * @param assetDetails 更新する内容（送られてきたデータ）
-     * @return 更新後のデータ
-     */
+    // 更新（口数再計算付き）
     public Asset updateAsset(Long id, Asset assetDetails) {
-        // IDでデータベースを検索。なければエラーにする。
         Asset asset = assetRepository.findById(id)
                 .orElseThrow(() -> new RuntimeException("Asset not found for this id :: " + id));
 
@@ -58,85 +35,76 @@ public class AssetService {
         asset.setInvestmentAmount(assetDetails.getInvestmentAmount());
         asset.setAcquisitionPrice(assetDetails.getAcquisitionPrice());
         asset.setCurrentPrice(assetDetails.getCurrentPrice());
-        asset.setInvestmentDate(assetDetails.getInvestmentDate());
+        asset.setCode(assetDetails.getCode());
 
-        // 計算ロジックの再適用（もし金額などが修正された場合、口数も再計算が必要）
-        if (asset.getInvestmentAmount() != null && asset.getAcquisitionPrice() != null) {
-            BigDecimal units = asset.getInvestmentAmount()
-                    .divide(asset.getAcquisitionPrice(), 4, RoundingMode.HALF_UP)
-                    .multiply(new BigDecimal("10000"));
-            asset.setHoldingUnits(units);
-        }
-        // 上書き保存
+        // 金額や取得単価が変わっていたら口数を再計算
+        calculateUnits(asset);
+
         return assetRepository.save(asset);
     }
 
-    /*
-     * 資産データを削除する
-     */
     public void deleteAsset(Long id) {
         Asset asset = assetRepository.findById(id)
                 .orElseThrow(() -> new RuntimeException("Asset not found for this id :: " + id));
         assetRepository.delete(asset);
     }
 
-    // 資産状況のサマリー（元本、評価額、含み益）を計算する
+    // ★修正: 正確な集計ロジック
     public AssetSummaryResponse getSummary() {
         List<Asset> allAssets = assetRepository.findAll();
 
-        // DB側で処理させた方がパフォーマンスがいい　下は非推奨
         // 1. 投資元本の合計
         BigDecimal totalInvestment = allAssets.stream()
                 .map(Asset::getInvestmentAmount)
                 .filter(amount -> amount != null)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
 
+        // 2. 保有金額（時価総額）の合計
         BigDecimal totalCurrentValue = allAssets.stream()
-                .filter(asset -> asset.getHoldingUnits() != null && asset.getCurrentPrice() != null)
-                .map(asset -> asset.getHoldingUnits()
-                        .multiply(asset.getCurrentPrice())
-                        .divide(new BigDecimal("10000"), 0, RoundingMode.HALF_UP))// 円未満四捨五入
+                .filter(asset -> asset.getCurrentPrice() != null) // 現在値さえあれば計算する
+                .map(asset -> {
+                    // 口数を取得
+                    BigDecimal units = asset.getHoldingUnits();
+
+                    // ★ここが強化ポイント
+                    // もし口数が保存されていなければ、投資額と取得単価からその場で計算する
+                    if (units == null
+                            && asset.getInvestmentAmount() != null
+                            && asset.getAcquisitionPrice() != null
+                            && asset.getAcquisitionPrice().compareTo(BigDecimal.ZERO) > 0) {
+
+                        units = asset.getInvestmentAmount()
+                                .divide(asset.getAcquisitionPrice(), 4, RoundingMode.HALF_UP)
+                                .multiply(new BigDecimal("10000"));
+                    }
+
+                    // それでも計算できなければ 0
+                    if (units == null) return BigDecimal.ZERO;
+
+                    // 評価額 = 口数 × 現在値 ÷ 10000
+                    return units.multiply(asset.getCurrentPrice())
+                            .divide(new BigDecimal("10000"), 0, RoundingMode.HALF_UP);
+                })
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
 
-        // 3. 含み益 = 評価額 - 元本
+        // 3. 含み益
         BigDecimal totalProfitLoss = totalCurrentValue.subtract(totalInvestment);
 
-        // DTOにセット
-        AssetSummaryResponse response = new AssetSummaryResponse();
-        response.setTotalInvestmentAmount(totalInvestment);
-        response.setTotalCurrentValue(totalCurrentValue);
-        response.setTotalProfitLoss(totalProfitLoss);
-
-        return response;
+        return new AssetSummaryResponse(totalInvestment, totalCurrentValue, totalProfitLoss);
     }
 
+    // 共通の計算ロジック（投資額と取得単価から口数を計算）
+    private void calculateUnits(Asset asset) {
+        if (asset.getInvestmentAmount() != null
+                && asset.getAcquisitionPrice() != null
+                && asset.getAcquisitionPrice().compareTo(BigDecimal.ZERO) > 0) {
+
+            BigDecimal units = asset.getInvestmentAmount()
+                    .divide(asset.getAcquisitionPrice(), 4, RoundingMode.HALF_UP)
+                    .multiply(new BigDecimal("10000"));
+
+            // 小数点以下を切り捨てて整数にするかどうかはお好みで（通常は口数はデータ上は少数もあり得るが、一旦そのまま）
+            asset.setHoldingUnits(units);
+        }
+    }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

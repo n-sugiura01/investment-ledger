@@ -3,10 +3,12 @@ package com.naoki.investmentledger.controller;
 import com.naoki.investmentledger.dto.AssetSummaryResponse;
 import com.naoki.investmentledger.entity.Asset;
 import com.naoki.investmentledger.service.AssetService;
+import com.naoki.investmentledger.service.FundApiService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
+import java.math.BigDecimal;
 import java.util.List;
 
 import static org.springframework.data.jpa.domain.AbstractPersistable_.id;
@@ -17,6 +19,7 @@ import static org.springframework.data.jpa.domain.AbstractPersistable_.id;
 public class AssetController {
 
     private final AssetService assetService;
+    private final FundApiService fundApiService;
 
     // GET /api/assets
     // 登録されているすべてのデータを返す
@@ -34,7 +37,6 @@ public class AssetController {
     }
 
     // Get /api/assets/summary
-    // 合計情報を返す新しい窓口
     @GetMapping("/summary")
     public AssetSummaryResponse getSummary() {
         return assetService.getSummary();
@@ -52,5 +54,32 @@ public class AssetController {
     @DeleteMapping("/{id}")
     public void deleteAsset(@PathVariable Long id) {
         assetService.deleteAsset(id);
+    }
+
+    @PostMapping("/refresh")
+    public List<Asset> refreshAllPrices() {
+        List<Asset> assets = assetService.getAllAssets();
+
+        for (Asset asset : assets) {
+            // コード(0331418Aなど)がある場合のみ更新
+            if (asset.getCode() != null && !asset.getCode().isEmpty()) {
+                // APIから価格を取得
+                Integer currentPrice = fundApiService.fetchFundDetails(asset.getCode());
+
+                if (currentPrice != null) {
+                    asset.setCurrentPrice(BigDecimal.valueOf(currentPrice));
+                    // 保存 (Serviceのsaveメソッドを再利用)
+                    assetService.saveAsset(asset);
+                }
+
+                // APIに負荷をかけないよう0.5秒待つ（マナー）
+                try {
+                    Thread.sleep(500);
+                } catch (InterruptedException e) {
+                }
+            }
+        }
+        // 更新後の全データを返す
+        return assetService.getAllAssets();
     }
 }

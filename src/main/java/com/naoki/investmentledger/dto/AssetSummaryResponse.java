@@ -1,10 +1,12 @@
 package com.naoki.investmentledger.dto;
 
+import lombok.AllArgsConstructor;
 import lombok.Data;
 
 import java.math.BigDecimal;
 
 @Data
+@AllArgsConstructor
 public class AssetSummaryResponse {
 
     // 投資元本
